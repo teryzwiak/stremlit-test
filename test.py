@@ -1,52 +1,76 @@
 import streamlit as st
+import pandas as pd
 
-def generate_voss_config(start_port, end_port, vlan_id, hostname):
-    config = [
-        f"!",
-        f"! Configuration for {hostname}",
-        f"!",
-        "vlan members add {vlan} {ports}".format(vlan=vlan_id, ports=f"1/{start_port}-1/{end_port}"),
-        f"interface gigabitEthernet 1/{start_port}-1/{end_port}"
-    ]
+st.set_page_config(page_title="VOSS Fabric Configurator", layout="wide")
+
+st.title("🔌 VOSS Multi-Switch Configurator")
+st.markdown("Zdefiniuj swoje przełączniki, a następnie przypisz VLANy do konkretnych portów.")
+
+# --- KROK 1: Definiowanie Switchy ---
+st.header("1. Twoja Infrastruktura")
+if 'switches' not in st.session_state:
+    st.session_state.switches = ["Switch-01"]
+
+new_switch = st.text_input("Dodaj nowy switch (nazwa):")
+if st.button("Dodaj do listy"):
+    if new_switch and new_switch not in st.session_state.switches:
+        st.session_state.switches.append(new_switch)
+        st.rerun()
+
+selected_switch = st.selectbox("Wybierz switch do konfiguracji:", st.session_state.switches)
+
+# --- KROK 2: Tabela Portów ---
+st.header(f"2. Konfiguracja portów dla: {selected_switch}")
+
+# Tworzymy bazowy DataFrame dla 48 portów
+if f"df_{selected_switch}" not in st.session_state:
+    data = {
+        "Port": [f"1/{i}" for i in range(1, 49)],
+        "VLAN": [1] * 48,  # Domyślnie VLAN 1
+        "Status": ["Access"] * 48
+    }
+    st.session_state[f"df_{selected_switch}"] = pd.DataFrame(data)
+
+# Edytor tabeli
+edited_df = st.data_editor(
+    st.session_state[f"df_{selected_switch}"],
+    column_config={
+        "Port": st.column_config.TextColumn("Port (GigabitEthernet)", disabled=True),
+        "VLAN": st.column_config.NumberColumn("VLAN ID", min_value=1, max_value=4094, step=1),
+        "Status": st.column_config.SelectboxColumn("Tryb", options=["Access", "Disabled"])
+    },
+    hide_index=True,
+    key=f"editor_{selected_switch}"
+)
+
+# Zapisujemy zmiany w stanie sesji
+st.session_state[f"df_{selected_switch}"] = edited_df
+
+# --- KROK 3: Generowanie Configu ---
+st.header("3. Wynikowy Config (CLI)")
+
+def generate_voss_script(df, hostname):
+    lines = [f"!", f"! Config for {hostname}", f"!"]
     
-    # W VOSS zazwyczaj ustawiamy domyślny VLAN (untagged) i włączamy discard-tagged jeśli to port dostępowy
-    config.append(f"  untagged-vlan {vlan_id}")
-    config.append("  exit")
+    # Grupowanie portów po VLANie, żeby nie pisać komendy dla każdego portu osobno
+    vlan_groups = df[df["Status"] == "Access"].groupby("VLAN")["Port"].apply(list)
     
-    return "\n".join(config)
+    for vlan, ports in vlan_groups.items():
+        port_range = ",".join(ports)
+        lines.append(f"vlan members add {vlan} {port_range}")
+        for p in ports:
+            lines.append(f"interface gigabitEthernet {p}")
+            lines.append(f"  untagged-vlan {vlan}")
+            lines.append("  exit")
+    
+    return "\n".join(lines)
 
-# --- UI ---
-st.set_page_config(page_title="VOSS Config Generator", page_icon="🌐")
+full_config = generate_voss_script(edited_df, selected_switch)
 
-st.title("🚀 Extreme VOSS Port Configurator")
-st.markdown("Generator konfiguracji dla przełączników serii VSP/Universal (VOSS).")
+st.code(full_config, language="bash")
 
-with st.sidebar:
-    st.header("Ustawienia Ogólne")
-    hostname = st.text_input("Nazwa switcha", "Extreme-VSP-01")
-    vlan_id = st.number_input("ID VLANu", min_value=1, max_value=4094, value=10)
-
-st.subheader("Zakres portów (48-portowy switch)")
-col1, col2 = st.columns(2)
-
-with col1:
-    start_p = st.number_input("Pierwszy port", min_value=1, max_value=48, value=1)
-with col2:
-    end_p = st.number_input("Ostatni port", min_value=1, max_value=48, value=1)
-
-if start_p > end_p:
-    st.error("Błąd: Port początkowy nie może być większy niż końcowy!")
-else:
-    config_result = generate_voss_config(start_p, end_p, vlan_id, hostname)
-
-    st.markdown("### Wygenerowany Config:")
-    st.code(config_result, language="bash")
-
-    st.download_button(
-        label="Pobierz jako .txt",
-        data=config_result,
-        file_name=f"config_{hostname}.txt",
-        mime="text/plain"
-    )
-
-st.info("💡 Wskazówka: W VOSS komenda `vlan members add` jest wymagana globalnie lub w kontekście VLANu, aby port mógł przesyłać ruch.")
+st.download_button(
+    label="Pobierz konfigurację",
+    data=full_config,
+    file_name=f"{selected_switch}_config.txt"
+)
